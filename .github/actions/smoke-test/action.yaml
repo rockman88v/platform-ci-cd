@@ -1,0 +1,25 @@
+name: Smoke tests
+description: Run an application-owned smoke test script with a stable platform interface.
+inputs:
+  base-url:
+    description: Deployed application base URL
+    required: true
+  test-path:
+    description: Directory containing application-owned run.sh
+    required: true
+  timeout:
+    description: Maximum runtime, accepted by GNU timeout (e.g. 5m)
+    required: false
+    default: 5m
+runs:
+  using: composite
+  steps:
+    - name: Run smoke tests
+      shell: bash
+      env:
+        BASE_URL: ${{ inputs.base-url }}
+        TEST_PATH: ${{ inputs.test-path }}
+        TEST_TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        bash "$GITHUB_ACTION_PATH/../../../scripts/smoke/run.sh"

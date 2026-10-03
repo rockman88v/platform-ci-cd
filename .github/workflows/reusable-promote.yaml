@@ -1,0 +1,143 @@
+name: Reusable GitOps promotion
+on:
+  workflow_call:
+    inputs:
+      source-environment:
+        type: string
+        required: true
+      environment:
+        type: string
+        required: true
+      config-file:
+        type: string
+        required: false
+        default: deploy.yaml
+      upstream-run-id:
+        type: string
+        required: true
+    secrets:
+      GITOPS_WRITE_TOKEN:
+        required: false
+      GITOPS_READ_TOKEN:
+        required: false
+permissions:
+  contents: read
+  actions: read
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    steps:
+      - name: Validate upstream verification run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_RUN_ID: ${{ inputs.upstream-run-id }}
+          SOURCE_ENV: ${{ inputs.source-environment }}
+        run: |
+          set -euo pipefail
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${UPSTREAM_RUN_ID}")"
+          expected_name="Verify DEV"
+          if [[ "$SOURCE_ENV" == "staging" ]]; then expected_name="Verify STAGING"; fi
+          [[ "$(jq -r .name <<< "$run_json")" == "$expected_name" ]]
+          [[ "$(jq -r .status <<< "$run_json")" == "completed" ]]
+          [[ "$(jq -r .conclusion <<< "$run_json")" == "success" ]]
+          [[ "$(jq -r .head_repository.full_name <<< "$run_json")" == "$GITHUB_REPOSITORY" ]]
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-context
+          path: release-context
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.upstream-run-id }}
+          github-token: ${{ github.token }}
+      - id: context
+        name: Read originating source SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha="$(jq -er '.sourceSha | strings | select(test("^[a-fA-F0-9]{40}$"))' release-context/release-context.json)"
+          build_run_id="$(jq -er '.buildRunId | strings | select(test("^[0-9]+$"))' release-context/release-context.json)"
+          echo "source-sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "build-run-id=$build_run_id" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.context.outputs.source-sha }}
+      - id: source-config
+        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1
+        with:
+          config-file: ${{ inputs.config-file }}
+          environment: ${{ inputs.source-environment }}
+      - id: target-config
+        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1
+        with:
+          config-file: ${{ inputs.config-file }}
+          environment: ${{ inputs.environment }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: image-metadata
+          path: image-metadata
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.context.outputs.build-run-id }}
+          github-token: ${{ github.token }}
+      - id: metadata
+        uses: rockman88v/platform-ci-cd/.github/actions/image-metadata@v1
+        with:
+          mode: read
+          metadata-file: image-metadata/image-metadata.json
+      - name: Enforce build metadata source SHA
+        env:
+          EXPECTED_SHA: ${{ steps.context.outputs.source-sha }}
+          ARTIFACT_SHA: ${{ steps.metadata.outputs.git-sha }}
+        run: test "$EXPECTED_SHA" = "$ARTIFACT_SHA"
+      - name: Enforce configured image repository
+        env:
+          SOURCE_REPOSITORY: ${{ steps.source-config.outputs.image-repository }}
+          TARGET_REPOSITORY: ${{ steps.target-config.outputs.image-repository }}
+          ARTIFACT_REPOSITORY: ${{ steps.metadata.outputs.image-repository }}
+        run: test "$SOURCE_REPOSITORY" = "$ARTIFACT_REPOSITORY" && test "$TARGET_REPOSITORY" = "$ARTIFACT_REPOSITORY"
+      - name: Verify previous environment used this exact artifact
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.source-config.outputs.gitops-repository }}
+          token: ${{ secrets.GITOPS_READ_TOKEN }}
+          path: gitops-source
+          persist-credentials: false
+      - name: Compare source environment digest
+        shell: bash
+        env:
+          VALUES_FILE: gitops-source/${{ steps.source-config.outputs.chart-path }}/${{ steps.source-config.outputs.values-file }}
+          EXPECTED_DIGEST: ${{ steps.metadata.outputs.image-digest }}
+          EXPECTED_TAG: ${{ steps.metadata.outputs.image-tag }}
+          EXPECTED_REPOSITORY: ${{ steps.metadata.outputs.image-repository }}
+        run: |
+          set -euo pipefail
+          actual_digest="$(python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["image"]["digest"])' "$VALUES_FILE")"
+          actual_tag="$(python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["image"]["tag"])' "$VALUES_FILE")"
+          actual_repository="$(python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["image"]["repository"])' "$VALUES_FILE")"
+          [[ "$actual_digest" == "$EXPECTED_DIGEST" && "$actual_tag" == "$EXPECTED_TAG" && "$actual_repository" == "$EXPECTED_REPOSITORY" ]] || {
+            echo "Source environment is not running the exact verified build artifact; promotion denied." >&2
+            exit 1
+          }
+      - uses: rockman88v/platform-ci-cd/.github/actions/update-gitops@v1
+        with:
+          gitops-repository: ${{ steps.target-config.outputs.gitops-repository }}
+          gitops-token: ${{ secrets.GITOPS_WRITE_TOKEN }}
+          chart-path: ${{ steps.target-config.outputs.chart-path }}
+          values-file: ${{ steps.target-config.outputs.values-file }}
+          image-tag-path: ${{ steps.target-config.outputs.image-tag-path }}
+          image-tag: ${{ steps.metadata.outputs.image-tag }}
+          image-digest-path: ${{ steps.target-config.outputs.image-digest-path }}
+          image-digest: ${{ steps.metadata.outputs.image-digest }}
+          commit-message: "chore(${{ steps.target-config.outputs.application }}): promote ${{ steps.metadata.outputs.git-sha }} to ${{ inputs.environment }}"
+      - name: Preserve release context for the next workflow
+        env:
+          SOURCE_SHA: ${{ steps.context.outputs.source-sha }}
+          BUILD_RUN_ID: ${{ steps.context.outputs.build-run-id }}
+        run: jq -n --arg sourceSha "$SOURCE_SHA" --arg buildRunId "$BUILD_RUN_ID" '{sourceSha:$sourceSha,buildRunId:$buildRunId}' > release-context.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-context
+          path: release-context.json
+          if-no-files-found: error
+          retention-days: 90

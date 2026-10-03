@@ -1,0 +1,39 @@
+name: E2E tests
+description: Run application-owned E2E tests behind a stable framework/path/base URL contract.
+inputs:
+  test-framework:
+    description: Initial implementation supports shell; framework adapters can be added without changing callers.
+    required: false
+    default: shell
+  test-path:
+    description: Directory containing application-owned run.sh for shell framework
+    required: true
+  base-url:
+    description: Deployed application base URL
+    required: true
+  timeout:
+    description: Maximum runtime, accepted by GNU timeout (e.g. 15m)
+    required: false
+    default: 15m
+runs:
+  using: composite
+  steps:
+    - name: Validate framework
+      shell: bash
+      env:
+        TEST_FRAMEWORK: ${{ inputs.test-framework }}
+      run: |
+        set -euo pipefail
+        if [[ "$TEST_FRAMEWORK" != "shell" ]]; then
+          echo "Framework '$TEST_FRAMEWORK' is not enabled in this reference version; supported: shell." >&2
+          exit 1
+        fi
+    - name: Run E2E tests
+      shell: bash
+      env:
+        BASE_URL: ${{ inputs.base-url }}
+        TEST_PATH: ${{ inputs.test-path }}
+        TEST_TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        bash "$GITHUB_ACTION_PATH/../../../scripts/e2e/run.sh"

@@ -1,0 +1,168 @@
+name: Reusable image build and publish
+on:
+  workflow_call:
+    inputs:
+      application:
+        type: string
+        required: true
+      dockerfile:
+        type: string
+        required: false
+        default: ./Dockerfile
+      docker-context:
+        type: string
+        required: false
+        default: .
+      image-repository:
+        type: string
+        required: true
+      image-tag:
+        type: string
+        required: false
+        default: ""
+      docker-build-args:
+        type: string
+        required: false
+        default: ""
+      trivy-severity:
+        type: string
+        required: false
+        default: CRITICAL,HIGH
+      trivy-ignore-unfixed:
+        type: boolean
+        required: false
+        default: true
+      fail-on-vulnerability:
+        type: boolean
+        required: false
+        default: true
+      aws-region:
+        type: string
+        required: true
+    secrets:
+      AWS_ROLE_ARN:
+        required: true
+    outputs:
+      image-tag:
+        description: Full Git SHA tag
+        value: ${{ jobs.build.outputs.image_tag }}
+      image-digest:
+        description: ECR immutable digest
+        value: ${{ jobs.build.outputs.image_digest }}
+      metadata-artifact:
+        description: Build metadata artifact name
+        value: image-metadata
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: image-${{ inputs.application }}-${{ github.sha }}
+      cancel-in-progress: false
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      image_digest: ${{ steps.digest.outputs.image_digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve immutable tag
+        id: meta
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.image-tag }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tag="$INPUT_TAG"
+          if [[ -z "$tag" ]]; then tag="$SOURCE_SHA"; fi
+          if [[ "$tag" != "$SOURCE_SHA" ]]; then
+            echo "image-tag must equal the full source commit SHA; custom tags are not accepted." >&2
+            exit 1
+          fi
+          echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - id: existing
+        name: Check whether immutable SHA tag already exists
+        shell: bash
+        env:
+          IMAGE_REPOSITORY: ${{ inputs.image-repository }}
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+          AWS_REGION: ${{ inputs.aws-region }}
+        run: |
+          set -euo pipefail
+          repository_name="${IMAGE_REPOSITORY#*/}"
+          if digest="$(aws ecr describe-images --region "$AWS_REGION" \
+            --repository-name "$repository_name" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'imageDetails[0].imageDigest' --output text 2>/dev/null)" && \
+            [[ "$digest" =~ ^sha256:[a-fA-F0-9]{64}$ ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "An image already exists for this immutable SHA tag; reusing it."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Pull existing immutable image
+        if: ${{ steps.existing.outputs.exists == 'true' }}
+        run: docker pull "${{ inputs.image-repository }}:${{ steps.meta.outputs.image_tag }}"
+      - name: Build one local image
+        if: ${{ steps.existing.outputs.exists == 'false' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.docker-context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ inputs.image-repository }}:${{ steps.meta.outputs.image_tag }}
+          build-args: ${{ inputs.docker-build-args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ inputs.image-repository }}:${{ steps.meta.outputs.image_tag }}
+          format: table
+          severity: ${{ inputs.trivy-severity }}
+          ignore-unfixed: ${{ inputs.trivy-ignore-unfixed }}
+          exit-code: ${{ inputs.fail-on-vulnerability && '1' || '0' }}
+      - name: Push scanned image to ECR
+        if: ${{ steps.existing.outputs.exists == 'false' }}
+        run: docker push "${{ inputs.image-repository }}:${{ steps.meta.outputs.image_tag }}"
+      - id: digest
+        name: Resolve immutable ECR digest
+        shell: bash
+        env:
+          IMAGE_REPOSITORY: ${{ inputs.image-repository }}
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+          AWS_REGION: ${{ inputs.aws-region }}
+        run: |
+          set -euo pipefail
+          repository_name="${IMAGE_REPOSITORY#*/}"
+          digest="$(aws ecr describe-images --region "$AWS_REGION" \
+            --repository-name "$repository_name" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'imageDetails[0].imageDigest' --output text)"
+          [[ "$digest" =~ ^sha256:[a-fA-F0-9]{64}$ ]] || { echo "ECR returned an invalid digest." >&2; exit 1; }
+          echo "image_digest=$digest" >> "$GITHUB_OUTPUT"
+      - id: metadata
+        uses: rockman88v/platform-ci-cd/.github/actions/image-metadata@v1
+        with:
+          mode: create
+          application: ${{ inputs.application }}
+          git-sha: ${{ github.sha }}
+          image-repository: ${{ inputs.image-repository }}
+          image-tag: ${{ steps.meta.outputs.image_tag }}
+          image-digest: ${{ steps.digest.outputs.image_digest }}
+          metadata-file: image-metadata.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-metadata
+          path: image-metadata.json
+          if-no-files-found: error
+          retention-days: 90

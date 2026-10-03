@@ -1,0 +1,75 @@
+name: Read deployment configuration
+description: Parse an application's deploy.yaml and expose a selected environment's deployment/test settings.
+inputs:
+  config-file:
+    description: Application deployment config YAML path in the checked-out application repository
+    required: false
+    default: deploy.yaml
+  environment:
+    description: Environment key (dev, staging, production)
+    required: true
+outputs:
+  application:
+    description: Service name
+    value: ${{ steps.config.outputs.application }}
+  image-repository:
+    description: Canonical ECR repository
+    value: ${{ steps.config.outputs.imageRepository }}
+  image-tag-path:
+    description: Dotted image tag path in GitOps values
+    value: ${{ steps.config.outputs.imageTagPath }}
+  image-digest-path:
+    description: Dotted image digest path in GitOps values
+    value: ${{ steps.config.outputs.imageDigestPath }}
+  gitops-repository:
+    description: GitOps repository owner/name
+    value: ${{ steps.config.outputs.gitopsRepository }}
+  chart-path:
+    description: Chart path in GitOps repository
+    value: ${{ steps.config.outputs.chartPath }}
+  values-file:
+    description: Environment values file relative to chart path
+    value: ${{ steps.config.outputs.valuesFile }}
+  argo-server:
+    description: Argo CD server address
+    value: ${{ steps.config.outputs.argoServer }}
+  argo-application:
+    description: Argo CD application name
+    value: ${{ steps.config.outputs.argoApplication }}
+  base-url:
+    description: Environment application URL
+    value: ${{ steps.config.outputs.baseUrl }}
+  smoke-enabled:
+    description: Whether smoke tests are enabled
+    value: ${{ steps.config.outputs.smokeEnabled }}
+  smoke-path:
+    description: Application smoke test directory
+    value: ${{ steps.config.outputs.smokePath }}
+  e2e-enabled:
+    description: Whether E2E tests are enabled
+    value: ${{ steps.config.outputs.e2eEnabled }}
+  e2e-path:
+    description: Application E2E test directory
+    value: ${{ steps.config.outputs.e2ePath }}
+  e2e-framework:
+    description: E2E framework adapter name
+    value: ${{ steps.config.outputs.e2eFramework }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install YAML parser
+      shell: bash
+      run: python -m pip install --disable-pip-version-check 'PyYAML==6.0.2'
+    - id: config
+      name: Parse configuration
+      shell: bash
+      env:
+        CONFIG_FILE: ${{ inputs.config-file }}
+        TARGET_ENV: ${{ inputs.environment }}
+      run: |
+        set -euo pipefail
+        result="$(python "$GITHUB_ACTION_PATH/../../../scripts/config/read-deploy-config.py" "$CONFIG_FILE" "$TARGET_ENV")"
+        jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$result" >> "$GITHUB_OUTPUT"

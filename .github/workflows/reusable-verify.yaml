@@ -1,0 +1,142 @@
+name: Reusable deployment verification
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      config-file:
+        type: string
+        required: false
+        default: deploy.yaml
+      upstream-run-id:
+        type: string
+        required: true
+    secrets:
+      GITOPS_READ_TOKEN:
+        required: false
+      ARGOCD_AUTH_TOKEN:
+        required: false
+permissions:
+  contents: read
+  actions: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    steps:
+      - name: Validate upstream lifecycle run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_RUN_ID: ${{ inputs.upstream-run-id }}
+          TARGET_ENV: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${UPSTREAM_RUN_ID}")"
+          expected_name="Deploy DEV"
+          if [[ "$TARGET_ENV" == "staging" ]]; then expected_name="Promote STAGING"; fi
+          [[ "$(jq -r .name <<< "$run_json")" == "$expected_name" ]]
+          [[ "$(jq -r .status <<< "$run_json")" == "completed" ]]
+          [[ "$(jq -r .conclusion <<< "$run_json")" == "success" ]]
+          [[ "$(jq -r .head_repository.full_name <<< "$run_json")" == "$GITHUB_REPOSITORY" ]]
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-context
+          path: release-context
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.upstream-run-id }}
+          github-token: ${{ github.token }}
+      - id: context
+        name: Read originating source SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha="$(jq -er '.sourceSha | strings | select(test("^[a-fA-F0-9]{40}$"))' release-context/release-context.json)"
+          build_run_id="$(jq -er '.buildRunId | strings | select(test("^[0-9]+$"))' release-context/release-context.json)"
+          echo "source-sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "build-run-id=$build_run_id" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.context.outputs.source-sha }}
+      - name: Read deployment config
+        id: config
+        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1
+        with:
+          config-file: ${{ inputs.config-file }}
+          environment: ${{ inputs.environment }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: image-metadata
+          path: image-metadata
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.context.outputs.build-run-id }}
+          github-token: ${{ github.token }}
+      - id: metadata
+        uses: rockman88v/platform-ci-cd/.github/actions/image-metadata@v1
+        with:
+          mode: read
+          metadata-file: image-metadata/image-metadata.json
+      - name: Enforce build metadata source SHA
+        env:
+          EXPECTED_SHA: ${{ steps.context.outputs.source-sha }}
+          ARTIFACT_SHA: ${{ steps.metadata.outputs.git-sha }}
+        run: test "$EXPECTED_SHA" = "$ARTIFACT_SHA"
+      - name: Enforce configured image repository
+        env:
+          CONFIGURED_REPOSITORY: ${{ steps.config.outputs.image-repository }}
+          ARTIFACT_REPOSITORY: ${{ steps.metadata.outputs.image-repository }}
+        run: test "$CONFIGURED_REPOSITORY" = "$ARTIFACT_REPOSITORY"
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.config.outputs.gitops-repository }}
+          token: ${{ secrets.GITOPS_READ_TOKEN }}
+          path: gitops
+          persist-credentials: false
+      - name: Verify GitOps environment points at build digest
+        shell: bash
+        env:
+          VALUES_FILE: gitops/${{ steps.config.outputs.chart-path }}/${{ steps.config.outputs.values-file }}
+          EXPECTED_DIGEST: ${{ steps.metadata.outputs.image-digest }}
+          EXPECTED_TAG: ${{ steps.metadata.outputs.image-tag }}
+          EXPECTED_REPOSITORY: ${{ steps.metadata.outputs.image-repository }}
+        run: |
+          set -euo pipefail
+          actual_digest="$(python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["image"]["digest"])' "$VALUES_FILE")"
+          actual_tag="$(python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["image"]["tag"])' "$VALUES_FILE")"
+          actual_repository="$(python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["image"]["repository"])' "$VALUES_FILE")"
+          [[ "$actual_digest" == "$EXPECTED_DIGEST" && "$actual_tag" == "$EXPECTED_TAG" && "$actual_repository" == "$EXPECTED_REPOSITORY" ]] || {
+            echo "GitOps image identity does not match the verified build artifact." >&2
+            exit 1
+          }
+      - uses: rockman88v/platform-ci-cd/.github/actions/wait-argocd@v1
+        with:
+          server: ${{ steps.config.outputs.argo-server }}
+          application: ${{ steps.config.outputs.argo-application }}
+          timeout: "600"
+          auth-token: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+      - uses: rockman88v/platform-ci-cd/.github/actions/smoke-test@v1
+        if: ${{ steps.config.outputs.smoke-enabled == 'true' }}
+        with:
+          base-url: ${{ steps.config.outputs.base-url }}
+          test-path: ${{ steps.config.outputs.smoke-path }}
+          timeout: 5m
+      - uses: rockman88v/platform-ci-cd/.github/actions/e2e-test@v1
+        if: ${{ steps.config.outputs.e2e-enabled == 'true' }}
+        with:
+          test-framework: ${{ steps.config.outputs.e2e-framework }}
+          base-url: ${{ steps.config.outputs.base-url }}
+          test-path: ${{ steps.config.outputs.e2e-path }}
+          timeout: 15m
+      - name: Preserve release context for the next workflow
+        env:
+          SOURCE_SHA: ${{ steps.context.outputs.source-sha }}
+          BUILD_RUN_ID: ${{ steps.context.outputs.build-run-id }}
+        run: jq -n --arg sourceSha "$SOURCE_SHA" --arg buildRunId "$BUILD_RUN_ID" '{sourceSha:$sourceSha,buildRunId:$buildRunId}' > release-context.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-context
+          path: release-context.json
+          if-no-files-found: error
+          retention-days: 90

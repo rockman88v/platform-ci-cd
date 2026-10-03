@@ -1,0 +1,97 @@
+name: Reusable GitOps deployment update
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      config-file:
+        type: string
+        required: false
+        default: deploy.yaml
+      source-sha:
+        type: string
+        required: true
+      build-run-id:
+        type: string
+        required: true
+    secrets:
+      GITOPS_WRITE_TOKEN:
+        required: false
+permissions:
+  contents: read
+  actions: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    steps:
+      - name: Validate triggering Build run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build-run-id }}
+          EXPECTED_SHA: ${{ inputs.source-sha }}
+        run: |
+          set -euo pipefail
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${BUILD_RUN_ID}")"
+          [[ "$(jq -r .name <<< "$run_json")" == "Build" ]]
+          [[ "$(jq -r .status <<< "$run_json")" == "completed" ]]
+          [[ "$(jq -r .conclusion <<< "$run_json")" == "success" ]]
+          [[ "$(jq -r .head_branch <<< "$run_json")" == "main" ]]
+          [[ "$(jq -r .head_sha <<< "$run_json")" == "$EXPECTED_SHA" ]]
+          [[ "$(jq -r .head_repository.full_name <<< "$run_json")" == "$GITHUB_REPOSITORY" ]]
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source-sha }}
+      - name: Read deployment config
+        id: config
+        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1
+        with:
+          config-file: ${{ inputs.config-file }}
+          environment: ${{ inputs.environment }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: image-metadata
+          path: image-metadata
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.build-run-id }}
+          github-token: ${{ github.token }}
+      - id: metadata
+        uses: rockman88v/platform-ci-cd/.github/actions/image-metadata@v1
+        with:
+          mode: read
+          metadata-file: image-metadata/image-metadata.json
+      - name: Enforce source commit identity
+        env:
+          EXPECTED_SHA: ${{ inputs.source-sha }}
+          ACTUAL_SHA: ${{ steps.metadata.outputs.git-sha }}
+        run: test "$EXPECTED_SHA" = "$ACTUAL_SHA"
+      - name: Enforce configured image repository
+        env:
+          CONFIGURED_REPOSITORY: ${{ steps.config.outputs.image-repository }}
+          ARTIFACT_REPOSITORY: ${{ steps.metadata.outputs.image-repository }}
+        run: test "$CONFIGURED_REPOSITORY" = "$ARTIFACT_REPOSITORY"
+      - uses: rockman88v/platform-ci-cd/.github/actions/update-gitops@v1
+        with:
+          gitops-repository: ${{ steps.config.outputs.gitops-repository }}
+          gitops-token: ${{ secrets.GITOPS_WRITE_TOKEN }}
+          chart-path: ${{ steps.config.outputs.chart-path }}
+          values-file: ${{ steps.config.outputs.values-file }}
+          image-tag-path: ${{ steps.config.outputs.image-tag-path }}
+          image-tag: ${{ steps.metadata.outputs.image-tag }}
+          image-digest-path: ${{ steps.config.outputs.image-digest-path }}
+          image-digest: ${{ steps.metadata.outputs.image-digest }}
+          commit-message: "chore(${{ steps.config.outputs.application }}): deploy ${{ steps.metadata.outputs.git-sha }} to ${{ inputs.environment }}"
+      - name: Write release context
+        env:
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          BUILD_RUN_ID: ${{ inputs.build-run-id }}
+        run: jq -n --arg sourceSha "$SOURCE_SHA" --arg buildRunId "$BUILD_RUN_ID" '{sourceSha:$sourceSha,buildRunId:$buildRunId}' > release-context.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-context
+          path: release-context.json
+          if-no-files-found: error
+          retention-days: 90

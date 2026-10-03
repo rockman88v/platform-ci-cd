@@ -1,0 +1,96 @@
+name: Image metadata
+description: Create or validate the immutable image metadata passed between lifecycle workflows.
+inputs:
+  mode:
+    description: create or read
+    required: true
+  application:
+    description: Application name
+    required: false
+    default: ""
+  git-sha:
+    description: Full source commit SHA
+    required: false
+    default: ""
+  image-repository:
+    description: Fully qualified registry/repository
+    required: false
+    default: ""
+  image-tag:
+    description: Immutable tag used for this build
+    required: false
+    default: ""
+  image-digest:
+    description: Registry-resolved sha256 digest
+    required: false
+    default: ""
+  metadata-file:
+    description: Path to metadata JSON when mode is read
+    required: false
+    default: image-metadata.json
+outputs:
+  application:
+    description: Application name
+    value: ${{ steps.metadata.outputs.application }}
+  git-sha:
+    description: Source SHA
+    value: ${{ steps.metadata.outputs.git_sha }}
+  image-repository:
+    description: Image repository
+    value: ${{ steps.metadata.outputs.image_repository }}
+  image-tag:
+    description: Immutable image tag
+    value: ${{ steps.metadata.outputs.image_tag }}
+  image-digest:
+    description: Immutable image digest
+    value: ${{ steps.metadata.outputs.image_digest }}
+  image-reference:
+    description: Repository@digest deployment reference
+    value: ${{ steps.metadata.outputs.image_reference }}
+runs:
+  using: composite
+  steps:
+    - id: metadata
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        APPLICATION: ${{ inputs.application }}
+        GIT_SHA: ${{ inputs.git-sha }}
+        IMAGE_REPOSITORY: ${{ inputs.image-repository }}
+        IMAGE_TAG: ${{ inputs.image-tag }}
+        IMAGE_DIGEST: ${{ inputs.image-digest }}
+        METADATA_FILE: ${{ inputs.metadata-file }}
+      run: |
+        set -euo pipefail
+        if [[ "$MODE" == "create" ]]; then
+          : "${APPLICATION:?application is required}"
+          : "${GIT_SHA:?git-sha is required}"
+          : "${IMAGE_REPOSITORY:?image-repository is required}"
+          : "${IMAGE_TAG:?image-tag is required}"
+          : "${IMAGE_DIGEST:?image-digest is required}"
+          jq -n \
+            --arg application "$APPLICATION" \
+            --arg gitSha "$GIT_SHA" \
+            --arg imageRepository "$IMAGE_REPOSITORY" \
+            --arg imageTag "$IMAGE_TAG" \
+            --arg imageDigest "$IMAGE_DIGEST" \
+            '{application:$application,gitSha:$gitSha,imageRepository:$imageRepository,imageTag:$imageTag,imageDigest:$imageDigest}' \
+            > "$METADATA_FILE"
+        elif [[ "$MODE" != "read" ]]; then
+          echo "mode must be create or read" >&2
+          exit 1
+        fi
+        test -s "$METADATA_FILE"
+        application="$(jq -er '.application | strings | select(length > 0)' "$METADATA_FILE")"
+        git_sha="$(jq -er '.gitSha | strings | select(test("^[a-fA-F0-9]{40}$"))' "$METADATA_FILE")"
+        image_repository="$(jq -er '.imageRepository | strings | select(length > 0)' "$METADATA_FILE")"
+        image_tag="$(jq -er '.imageTag | strings | select(length > 0)' "$METADATA_FILE")"
+        image_digest="$(jq -er '.imageDigest | strings | select(test("^sha256:[a-fA-F0-9]{64}$"))' "$METADATA_FILE")"
+        {
+          echo "application=$application"
+          echo "git_sha=$git_sha"
+          echo "image_repository=$image_repository"
+          echo "image_tag=$image_tag"
+          echo "image_digest=$image_digest"
+          echo "image_reference=${image_repository}@${image_digest}"
+        } >> "$GITHUB_OUTPUT"

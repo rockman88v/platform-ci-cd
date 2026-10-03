@@ -1,0 +1,101 @@
+name: Reusable .NET CI
+on:
+  workflow_call:
+    inputs:
+      dotnet-version:
+        type: string
+        required: false
+        default: 8.0.x
+      solution:
+        type: string
+        required: true
+      configuration:
+        type: string
+        required: false
+        default: Release
+      test-project:
+        type: string
+        required: false
+        default: ""
+      coverage-enabled:
+        type: boolean
+        required: false
+        default: true
+      sonarqube-enabled:
+        type: boolean
+        required: false
+        default: false
+      sonar-project-key:
+        type: string
+        required: false
+        default: ""
+      security-scan-enabled:
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      SONAR_TOKEN:
+        required: false
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+          cache: true
+          cache-dependency-path: '**/*.csproj'
+      - name: Restore
+        run: dotnet restore "${{ inputs.solution }}"
+      - name: Begin SonarQube analysis
+        if: ${{ inputs.sonarqube-enabled }}
+        shell: bash
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ inputs.sonar-project-key }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$SONAR_TOKEN" || -z "$SONAR_PROJECT_KEY" ]]; then
+            echo "sonarqube-enabled requires SONAR_TOKEN and sonar-project-key." >&2
+            exit 1
+          fi
+          dotnet tool install --global dotnet-sonarscanner
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          dotnet sonarscanner begin /k:"$SONAR_PROJECT_KEY" /d:sonar.host.url="https://sonarcloud.io" /d:sonar.cs.vscoveragexml.reportsPaths="coverage.xml"
+      - name: Build
+        run: dotnet build "${{ inputs.solution }}" --configuration "${{ inputs.configuration }}" --no-restore
+      - name: Unit tests
+        shell: bash
+        env:
+          TEST_PROJECT: ${{ inputs.test-project }}
+          SOLUTION: ${{ inputs.solution }}
+          CONFIGURATION: ${{ inputs.configuration }}
+          COVERAGE_ENABLED: ${{ inputs.coverage-enabled }}
+        run: |
+          set -euo pipefail
+          target="$SOLUTION"
+          if [[ -n "$TEST_PROJECT" ]]; then target="$TEST_PROJECT"; fi
+          args=(test "$target" --configuration "$CONFIGURATION" --no-build --logger "trx;LogFileName=tests.trx")
+          if [[ "$COVERAGE_ENABLED" == "true" ]]; then args+=(--collect:"XPlat Code Coverage"); fi
+          dotnet "${args[@]}"
+      - name: End SonarQube analysis
+        if: ${{ always() && inputs.sonarqube-enabled }}
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: dotnet sonarscanner end
+      - name: Dependency vulnerability report
+        if: ${{ inputs.security-scan-enabled }}
+        run: dotnet list "${{ inputs.solution }}" package --vulnerable --include-transitive
+      - name: Upload test results and coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-results-${{ github.run_id }}
+          path: |
+            **/TestResults/**/*.trx
+            **/TestResults/**/coverage.cobertura.xml
+          if-no-files-found: ignore
+          retention-days: 14

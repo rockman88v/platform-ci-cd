@@ -1,0 +1,100 @@
+name: Update GitOps values
+description: Safely update image tag/digest in a GitOps repository and push only when changed.
+inputs:
+  gitops-repository:
+    description: owner/repository
+    required: true
+  gitops-token:
+    description: Fine-grained token with contents write only on the GitOps repository
+    required: true
+  chart-path:
+    description: Path to application chart directory in GitOps repository
+    required: true
+  values-file:
+    description: Values path relative to chart-path
+    required: true
+  image-tag-path:
+    description: Dotted YAML path for image tag
+    required: false
+    default: image.tag
+  image-tag:
+    description: Immutable full Git SHA tag
+    required: true
+  image-digest-path:
+    description: Dotted YAML path for digest
+    required: false
+    default: image.digest
+  image-digest:
+    description: Registry-resolved sha256 digest
+    required: true
+  commit-message:
+    description: Git commit message
+    required: true
+outputs:
+  changed:
+    description: true when a GitOps commit was pushed
+    value: ${{ steps.push.outputs.changed }}
+  commit-sha:
+    description: GitOps commit SHA when pushed
+    value: ${{ steps.push.outputs.commit_sha }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.gitops-repository }}
+        token: ${{ inputs.gitops-token }}
+        path: gitops
+        persist-credentials: true
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install YAML parser
+      shell: bash
+      run: python -m pip install --disable-pip-version-check 'ruamel.yaml==0.18.10'
+    - name: Update values and validate YAML
+      shell: bash
+      env:
+        CHART_PATH: ${{ inputs.chart-path }}
+        VALUES_FILE: ${{ inputs.values-file }}
+        TAG_PATH: ${{ inputs.image-tag-path }}
+        IMAGE_TAG: ${{ inputs.image-tag }}
+        DIGEST_PATH: ${{ inputs.image-digest-path }}
+        IMAGE_DIGEST: ${{ inputs.image-digest }}
+      run: |
+        set -euo pipefail
+        target="gitops/${CHART_PATH}/${VALUES_FILE}"
+        test -f "$target"
+        python "$GITHUB_ACTION_PATH/../../../scripts/gitops/update-values.py" "$target" \
+          --tag-path "$TAG_PATH" --tag "$IMAGE_TAG" \
+          --digest-path "$DIGEST_PATH" --digest "$IMAGE_DIGEST"
+        python - "$target" <<'PY'
+        import sys
+        from ruamel.yaml import YAML
+        with open(sys.argv[1], encoding="utf-8") as stream:
+            data = YAML(typ="safe").load(stream)
+        if not isinstance(data, dict):
+            raise SystemExit("values YAML must have a mapping at its root")
+        PY
+        git -C gitops diff --check
+    - id: push
+      name: Commit and push if changed
+      shell: bash
+      env:
+        CHART_PATH: ${{ inputs.chart-path }}
+        VALUES_FILE: ${{ inputs.values-file }}
+        COMMIT_MESSAGE: ${{ inputs.commit-message }}
+      run: |
+        set -euo pipefail
+        git -C gitops config user.name "github-actions[bot]"
+        git -C gitops config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git -C gitops add -- "$CHART_PATH/$VALUES_FILE"
+        if git -C gitops diff --cached --quiet; then
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+          echo "GitOps values already match the requested image; no commit created."
+          exit 0
+        fi
+        git -C gitops commit -m "$COMMIT_MESSAGE"
+        git -C gitops push
+        echo "changed=true" >> "$GITHUB_OUTPUT"
+        echo "commit_sha=$(git -C gitops rev-parse HEAD)" >> "$GITHUB_OUTPUT"
