@@ -116,9 +116,9 @@ jobs:
           EXPECTED_REPOSITORY: ${{ steps.metadata.outputs.image-repository }}
         run: |
           set -euo pipefail
-          actual_digest="$(python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["repository"]["image"]["digest"])' "$VALUES_FILE")"
-          actual_tag="$(python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["repository"]["image"]["tag"])' "$VALUES_FILE")"
-          actual_repository="$(python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["repository"]["image"]["repository"])' "$VALUES_FILE")"
+          actual_digest="$(python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["microservice"]["image"]["digest"])' "$VALUES_FILE")"
+          actual_tag="$(python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["microservice"]["image"]["tag"])' "$VALUES_FILE")"
+          actual_repository="$(python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["microservice"]["image"]["repository"])' "$VALUES_FILE")"
           [[ "$actual_digest" == "$EXPECTED_DIGEST" && "$actual_tag" == "$EXPECTED_TAG" && "$actual_repository" == "$EXPECTED_REPOSITORY" ]] || {
             echo "Source environment is not running the exact verified build artifact; promotion denied." >&2
             exit 1
