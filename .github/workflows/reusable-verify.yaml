@@ -160,7 +160,11 @@ jobs:
           set -euo pipefail
           run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${UPSTREAM_RUN_ID}")"
           expected_name="Deploy DEV"
-          if [[ "$TARGET_ENV" == "staging" ]]; then expected_name="Promote STAGING"; fi
+          if [[ "$TARGET_ENV" == "staging" ]]; then
+            expected_name="Promote STAGING"
+          elif [[ "$TARGET_ENV" == "production" ]]; then
+            expected_name="Promote PRODUCTION"
+          fi
           [[ "$(jq -r .name <<< "$run_json")" == "$expected_name" ]]
           [[ "$(jq -r .status <<< "$run_json")" == "completed" ]]
           [[ "$(jq -r .conclusion <<< "$run_json")" == "success" ]]
