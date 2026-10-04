@@ -217,7 +217,13 @@ jobs:
           repository: ${{ steps.config.outputs.gitops-repository }}
           token: ${{ secrets.GITOPS_READ_TOKEN }}
           path: gitops
-          persist-credentials: false
+          persist-credentials: false      
+      - uses: rockman88v/platform-ci-cd/.github/actions/wait-argocd@main
+        with:
+          server: ${{ steps.config.outputs.argo-server }}
+          application: ${{ steps.config.outputs.argo-application }}
+          timeout: "600"
+          auth-token: ${{ secrets.ARGOCD_AUTH_TOKEN }}
       - name: Verify GitOps environment points at build digest
         shell: bash
         env:
@@ -234,12 +240,6 @@ jobs:
             echo "GitOps image identity does not match the verified build artifact." >&2
             exit 1
           }
-      - uses: rockman88v/platform-ci-cd/.github/actions/wait-argocd@main
-        with:
-          server: ${{ steps.config.outputs.argo-server }}
-          application: ${{ steps.config.outputs.argo-application }}
-          timeout: "600"
-          auth-token: ${{ secrets.ARGOCD_AUTH_TOKEN }}
       - uses: rockman88v/platform-ci-cd/.github/actions/smoke-test@main
         if: ${{ steps.config.outputs.smoke-enabled == 'true' }}
         with:
