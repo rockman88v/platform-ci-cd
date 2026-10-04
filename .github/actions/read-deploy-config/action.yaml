@@ -57,9 +57,9 @@ outputs:
 runs:
   using: composite
   steps:
-    - uses: actions/setup-python@v5
-      with:
-        python-version: "3.12"
+    # - uses: actions/setup-python@v5
+    #   with:
+    #     python-version: "3.12"
     - name: Install YAML parser
       shell: bash
       run: python -m pip install --disable-pip-version-check 'PyYAML==6.0.2'
@@ -71,5 +71,5 @@ runs:
         TARGET_ENV: ${{ inputs.environment }}
       run: |
         set -euo pipefail
-        result="$(python "$GITHUB_ACTION_PATH/../../../scripts/config/read-deploy-config.py" "$CONFIG_FILE" "$TARGET_ENV")"
+        result="$(python3 "$GITHUB_ACTION_PATH/../../../scripts/config/read-deploy-config.py" "$CONFIG_FILE" "$TARGET_ENV")"
         jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$result" >> "$GITHUB_OUTPUT"
