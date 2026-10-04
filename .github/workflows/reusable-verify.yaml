@@ -27,8 +27,8 @@ permissions:
 jobs:
   verify:
     runs-on: ${{ inputs.runner }}
-    environment:
-      name: ${{ inputs.environment }}
+    # environment:
+    #   name: ${{ inputs.environment }}
     steps:
       - name: Prepare self-hosted runner
         shell: bash
