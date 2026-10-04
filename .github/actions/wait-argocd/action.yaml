@@ -1,8 +1,9 @@
 name: Wait for Argo CD
-description: Wait for an Argo CD application to become Synced and Healthy; fail on timeout or unhealthy state.
+description: Sync an Argo CD application, then wait for it to become Synced and Healthy; fail on timeout or unhealthy state.
+
 inputs:
   server:
-    description: Argo CD API hostname (with optional port, no scheme)
+    description: Argo CD API hostname with port, no scheme (for example argocd-server.argocd:80)
     required: true
   application:
     description: Argo CD application name
@@ -14,19 +15,42 @@ inputs:
   auth-token:
     description: Environment-scoped Argo CD bearer token
     required: true
+
 runs:
   using: composite
   steps:
     - name: Install Argo CD CLI
       shell: bash
+      env:
+        ARGO_SERVER: ${{ inputs.server }}
       run: |
         set -euo pipefail
-        version="v2.13.2"
+
+        # Download the CLI directly from the Argo CD server.
+        # This avoids the slow GitHub release download and keeps the CLI
+        # version aligned with the Argo CD server.
         curl --fail --silent --show-error --location \
-          "https://github.com/argoproj/argo-cd/releases/download/${version}/argocd-linux-amd64" \
+          "http://${ARGO_SERVER}/download/argocd-linux-amd64" \
           --output "$RUNNER_TEMP/argocd"
+
         chmod 0755 "$RUNNER_TEMP/argocd"
         echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+    - name: Sync Argo CD application
+      shell: bash
+      env:
+        ARGO_SERVER: ${{ inputs.server }}
+        ARGO_APPLICATION: ${{ inputs.application }}
+        ARGOCD_AUTH_TOKEN: ${{ inputs.auth-token }}
+      run: |
+        set -euo pipefail
+
+        argocd app sync "$ARGO_APPLICATION" \
+          --server "$ARGO_SERVER" \
+          --auth-token "$ARGOCD_AUTH_TOKEN" \
+          --plaintext \
+          --grpc-web
+
     - name: Wait for synced and healthy application
       shell: bash
       env:
@@ -36,10 +60,15 @@ runs:
         ARGOCD_AUTH_TOKEN: ${{ inputs.auth-token }}
       run: |
         set -euo pipefail
+
         if ! argocd app wait "$ARGO_APPLICATION" \
           --server "$ARGO_SERVER" \
           --auth-token "$ARGOCD_AUTH_TOKEN" \
-          --sync --health --timeout "$ARGO_TIMEOUT"; then
+          --plaintext \
+          --grpc-web \
+          --sync \
+          --health \
+          --timeout "$ARGO_TIMEOUT"; then
           echo "Argo CD application '$ARGO_APPLICATION' did not become Synced and Healthy within ${ARGO_TIMEOUT}s." >&2
           exit 1
         fi
