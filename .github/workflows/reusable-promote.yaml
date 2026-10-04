@@ -68,12 +68,12 @@ jobs:
         with:
           ref: ${{ steps.context.outputs.source-sha }}
       - id: source-config
-        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1.7
+        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1.8
         with:
           config-file: ${{ inputs.config-file }}
           environment: ${{ inputs.source-environment }}
       - id: target-config
-        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1.7
+        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1.8
         with:
           config-file: ${{ inputs.config-file }}
           environment: ${{ inputs.environment }}
@@ -85,7 +85,7 @@ jobs:
           run-id: ${{ steps.context.outputs.build-run-id }}
           github-token: ${{ github.token }}
       - id: metadata
-        uses: rockman88v/platform-ci-cd/.github/actions/image-metadata@v1.7
+        uses: rockman88v/platform-ci-cd/.github/actions/image-metadata@v1.8
         with:
           mode: read
           metadata-file: image-metadata/image-metadata.json
@@ -123,7 +123,7 @@ jobs:
             echo "Source environment is not running the exact verified build artifact; promotion denied." >&2
             exit 1
           }
-      - uses: rockman88v/platform-ci-cd/.github/actions/update-gitops@v1.7
+      - uses: rockman88v/platform-ci-cd/.github/actions/update-gitops@v1.8
         with:
           gitops-repository: ${{ steps.target-config.outputs.gitops-repository }}
           gitops-token: ${{ secrets.GITOPS_WRITE_TOKEN }}
