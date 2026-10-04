@@ -151,7 +151,7 @@ jobs:
           [[ "$digest" =~ ^sha256:[a-fA-F0-9]{64}$ ]] || { echo "ECR returned an invalid digest." >&2; exit 1; }
           echo "image_digest=$digest" >> "$GITHUB_OUTPUT"
       - id: metadata
-        uses: rockman88v/platform-ci-cd/.github/actions/image-metadata@v1.2
+        uses: rockman88v/platform-ci-cd/.github/actions/image-metadata@v1.3
         with:
           mode: create
           application: ${{ inputs.application }}

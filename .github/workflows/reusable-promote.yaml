@@ -2,6 +2,10 @@ name: Reusable GitOps promotion
 on:
   workflow_call:
     inputs:
+      runner:
+        required: false
+        type: string
+        default: ubuntu-latest
       source-environment:
         type: string
         required: true
@@ -25,7 +29,7 @@ permissions:
   actions: read
 jobs:
   promote:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     environment:
       name: ${{ inputs.environment }}
     steps:
@@ -64,12 +68,12 @@ jobs:
         with:
           ref: ${{ steps.context.outputs.source-sha }}
       - id: source-config
-        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1.2
+        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1.3
         with:
           config-file: ${{ inputs.config-file }}
           environment: ${{ inputs.source-environment }}
       - id: target-config
-        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1.2
+        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1.3
         with:
           config-file: ${{ inputs.config-file }}
           environment: ${{ inputs.environment }}
@@ -81,7 +85,7 @@ jobs:
           run-id: ${{ steps.context.outputs.build-run-id }}
           github-token: ${{ github.token }}
       - id: metadata
-        uses: rockman88v/platform-ci-cd/.github/actions/image-metadata@v1.2
+        uses: rockman88v/platform-ci-cd/.github/actions/image-metadata@v1.3
         with:
           mode: read
           metadata-file: image-metadata/image-metadata.json
@@ -119,7 +123,7 @@ jobs:
             echo "Source environment is not running the exact verified build artifact; promotion denied." >&2
             exit 1
           }
-      - uses: rockman88v/platform-ci-cd/.github/actions/update-gitops@v1.2
+      - uses: rockman88v/platform-ci-cd/.github/actions/update-gitops@v1.3
         with:
           gitops-repository: ${{ steps.target-config.outputs.gitops-repository }}
           gitops-token: ${{ secrets.GITOPS_WRITE_TOKEN }}
