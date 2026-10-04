@@ -2,7 +2,7 @@ name: Reusable GitOps deployment update
 on:
   workflow_call:
     inputs:
-    runner:
+      runner:
         required: false
         type: string
         default: ubuntu-latest
