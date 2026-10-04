@@ -30,6 +30,126 @@ jobs:
     environment:
       name: ${{ inputs.environment }}
     steps:
+      - name: Prepare self-hosted runner
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Runner information ==="
+          echo "Runner:        ${RUNNER_NAME:-unknown}"
+          echo "OS:             ${RUNNER_OS:-unknown}"
+          echo "Architecture:   ${RUNNER_ARCH:-unknown}"
+          echo "Hostname:       $(hostname)"
+          echo
+
+          echo "=== Check base tools ==="
+
+          command -v git || {
+            echo "ERROR: git is not installed"
+            exit 1
+          }
+
+          command -v curl || {
+            echo "ERROR: curl is not installed"
+            exit 1
+          }
+
+          # ----------------------------------------------------------
+          # Install GitHub CLI if missing
+          # ----------------------------------------------------------
+
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "gh not found. Installing GitHub CLI..."
+
+            if command -v apt-get >/dev/null 2>&1; then
+              if [ "$(id -u)" -eq 0 ]; then
+                apt-get update
+                apt-get install -y gh
+              elif command -v sudo >/dev/null 2>&1; then
+                sudo apt-get update
+                sudo apt-get install -y gh
+              else
+                echo "ERROR: apt-get exists but runner has neither root nor sudo"
+                exit 1
+              fi
+            else
+              echo "ERROR: Cannot install gh automatically."
+              echo "This runner does not have apt-get."
+              exit 1
+            fi
+          fi
+
+          # ----------------------------------------------------------
+          # jq
+          # ----------------------------------------------------------
+
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "jq not found. Installing..."
+
+            if [ "$(id -u)" -eq 0 ]; then
+              apt-get update
+              apt-get install -y jq
+            elif command -v sudo >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install -y jq
+            else
+              echo "ERROR: Cannot install jq"
+              exit 1
+            fi
+          fi
+
+          # ----------------------------------------------------------
+          # Python
+          # ----------------------------------------------------------
+
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo "python3 not found. Installing..."
+
+            if [ "$(id -u)" -eq 0 ]; then
+              apt-get update
+              apt-get install -y python3 python3-pip
+            elif command -v sudo >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install -y python3 python3-pip
+            else
+              echo "ERROR: Cannot install python3"
+              exit 1
+            fi
+          fi
+
+          # ----------------------------------------------------------
+          # PyYAML
+          # ----------------------------------------------------------
+
+          if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+            echo "PyYAML not found. Installing..."
+
+            if python3 -m pip install --help >/dev/null 2>&1; then
+              python3 -m pip install --user PyYAML
+            else
+              if [ "$(id -u)" -eq 0 ]; then
+                apt-get update
+                apt-get install -y python3-yaml
+              elif command -v sudo >/dev/null 2>&1; then
+                sudo apt-get update
+                sudo apt-get install -y python3-yaml
+              else
+                echo "ERROR: Cannot install PyYAML"
+                exit 1
+              fi
+            fi
+          fi
+
+          echo
+          echo "=== Tool versions ==="
+          git --version
+          gh --version
+          jq --version
+          python3 --version
+          python3 -c 'import yaml; print("PyYAML:", yaml.__version__)'
+
+          echo
+          echo "Runner preparation completed."      
       - name: Validate upstream lifecycle run
         shell: bash
         env:
