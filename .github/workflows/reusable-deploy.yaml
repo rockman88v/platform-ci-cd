@@ -47,7 +47,7 @@ jobs:
           ref: ${{ inputs.source-sha }}
       - name: Read deployment config
         id: config
-        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1
+        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1.2
         with:
           config-file: ${{ inputs.config-file }}
           environment: ${{ inputs.environment }}
@@ -59,7 +59,7 @@ jobs:
           run-id: ${{ inputs.build-run-id }}
           github-token: ${{ github.token }}
       - id: metadata
-        uses: rockman88v/platform-ci-cd/.github/actions/image-metadata@v1
+        uses: rockman88v/platform-ci-cd/.github/actions/image-metadata@v1.2
         with:
           mode: read
           metadata-file: image-metadata/image-metadata.json
@@ -73,7 +73,7 @@ jobs:
           CONFIGURED_REPOSITORY: ${{ steps.config.outputs.image-repository }}
           ARTIFACT_REPOSITORY: ${{ steps.metadata.outputs.image-repository }}
         run: test "$CONFIGURED_REPOSITORY" = "$ARTIFACT_REPOSITORY"
-      - uses: rockman88v/platform-ci-cd/.github/actions/update-gitops@v1
+      - uses: rockman88v/platform-ci-cd/.github/actions/update-gitops@v1.2
         with:
           gitops-repository: ${{ steps.config.outputs.gitops-repository }}
           gitops-token: ${{ secrets.GITOPS_WRITE_TOKEN }}

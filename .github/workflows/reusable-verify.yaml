@@ -2,6 +2,10 @@ name: Reusable deployment verification
 on:
   workflow_call:
     inputs:
+      runner:
+        required: false
+        type: string
+        default: ubuntu-latest
       environment:
         type: string
         required: true
@@ -22,7 +26,7 @@ permissions:
   actions: read
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     environment:
       name: ${{ inputs.environment }}
     steps:
@@ -62,7 +66,7 @@ jobs:
           ref: ${{ steps.context.outputs.source-sha }}
       - name: Read deployment config
         id: config
-        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1
+        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@v1.2
         with:
           config-file: ${{ inputs.config-file }}
           environment: ${{ inputs.environment }}
@@ -74,7 +78,7 @@ jobs:
           run-id: ${{ steps.context.outputs.build-run-id }}
           github-token: ${{ github.token }}
       - id: metadata
-        uses: rockman88v/platform-ci-cd/.github/actions/image-metadata@v1
+        uses: rockman88v/platform-ci-cd/.github/actions/image-metadata@v1.2
         with:
           mode: read
           metadata-file: image-metadata/image-metadata.json
@@ -110,19 +114,19 @@ jobs:
             echo "GitOps image identity does not match the verified build artifact." >&2
             exit 1
           }
-      - uses: rockman88v/platform-ci-cd/.github/actions/wait-argocd@v1
+      - uses: rockman88v/platform-ci-cd/.github/actions/wait-argocd@v1.2
         with:
           server: ${{ steps.config.outputs.argo-server }}
           application: ${{ steps.config.outputs.argo-application }}
           timeout: "600"
           auth-token: ${{ secrets.ARGOCD_AUTH_TOKEN }}
-      - uses: rockman88v/platform-ci-cd/.github/actions/smoke-test@v1
+      - uses: rockman88v/platform-ci-cd/.github/actions/smoke-test@v1.2
         if: ${{ steps.config.outputs.smoke-enabled == 'true' }}
         with:
           base-url: ${{ steps.config.outputs.base-url }}
           test-path: ${{ steps.config.outputs.smoke-path }}
           timeout: 5m
-      - uses: rockman88v/platform-ci-cd/.github/actions/e2e-test@v1
+      - uses: rockman88v/platform-ci-cd/.github/actions/e2e-test@v1.2
         if: ${{ steps.config.outputs.e2e-enabled == 'true' }}
         with:
           test-framework: ${{ steps.config.outputs.e2e-framework }}
