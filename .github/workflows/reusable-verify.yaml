@@ -325,6 +325,7 @@ jobs:
           timeout: "600"
           auth-token: ${{ secrets.ARGOCD_AUTH_TOKEN }}
       - name: Verify GitOps environment points at build digest
+        if: ${{ inputs.lifecycle-type == 'promotion' }}
         shell: bash
         env:
           VALUES_FILE: gitops/${{ steps.config.outputs.chart-path }}/${{ steps.config.outputs.values-file }}
@@ -354,11 +355,13 @@ jobs:
           test-path: ${{ steps.config.outputs.e2e-path }}
           timeout: 15m
       - name: Preserve release context for the next workflow
+        if: ${{ inputs.lifecycle-type == 'promotion' }}
         env:
           SOURCE_SHA: ${{ steps.context.outputs.source-sha }}
           BUILD_RUN_ID: ${{ steps.context.outputs.build-run-id }}
         run: jq -n --arg sourceSha "$SOURCE_SHA" --arg buildRunId "$BUILD_RUN_ID" '{sourceSha:$sourceSha,buildRunId:$buildRunId}' > release-context.json
       - uses: actions/upload-artifact@v4
+        if: ${{ inputs.lifecycle-type == 'promotion' }}
         with:
           name: release-context
           path: release-context.json
