@@ -112,7 +112,7 @@ jobs:
         name: Capture current target image before promotion
         shell: bash
         env:
-          VALUES_FILE: gitops-target/${{ steps.target-config.outputs.chart-path }}/${{ steps.target-config.outputs.values-file }}
+          VALUES_FILE: gitops-source/${{ steps.target-config.outputs.chart-path }}/${{ steps.target-config.outputs.values-file }}
           IMAGE_TAG_PATH: ${{ steps.target-config.outputs.image-tag-path }}
           IMAGE_DIGEST_PATH: ${{ steps.target-config.outputs.image-digest-path }}
         run: |
