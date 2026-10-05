@@ -1,101 +1,150 @@
-name: Reusable .NET CI
+name: Build
+
 on:
-  workflow_call:
-    inputs:
-      dotnet-version:
-        type: string
-        required: false
-        default: 8.0.x
-      solution:
-        type: string
-        required: true
-      configuration:
-        type: string
-        required: false
-        default: Release
-      test-project:
-        type: string
-        required: false
-        default: ""
-      coverage-enabled:
-        type: boolean
-        required: false
-        default: true
-      sonarqube-enabled:
-        type: boolean
-        required: false
-        default: false
-      sonar-project-key:
-        type: string
-        required: false
-        default: ""
-      security-scan-enabled:
-        type: boolean
-        required: false
-        default: true
-    secrets:
-      SONAR_TOKEN:
-        required: false
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
 jobs:
-  ci:
-    runs-on: ubuntu-20.04
-    permissions:
-      contents: read
+  build:
+    runs-on: ubuntu-latest
+
+    container:
+      image: ubuntu:20.04
+
+    env:
+      DOTNET_ROOT: /usr/share/dotnet
+      SOLUTION: ./PlayStudios.MyService/PlayStudios.MyService.sln
+      TEST_PROJECT: ./PlayStudios.MyService/PlayStudios.MyService.WebApi.Tests/PlayStudios.MyService.WebApi.Tests.csproj
+      CONFIGURATION: Release
+      COVERAGE_ENABLED: true
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      # ------------------------------------------------------------
+      # Base tools required by GitHub Actions and CI
+      # ------------------------------------------------------------
+      - name: Install base tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export DEBIAN_FRONTEND=noninteractive
+
+          apt-get update
+
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            wget \
+            git \
+            jq \
+            unzip \
+            zip \
+            tar \
+            gzip \
+            bash \
+            openssh-client \
+            gnupg \
+            apt-transport-https \
+            software-properties-common
+
+          rm -rf /var/lib/apt/lists/*
+
+      # ------------------------------------------------------------
+      # Checkout
+      # ------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------
+      # .NET Core 3.1
+      #
+      # .NET Core 3.1.0 release uses SDK 3.1.100
+      # ------------------------------------------------------------
+      - name: Setup .NET Core 3.1
+        uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: ${{ inputs.dotnet-version }}
+          dotnet-version: '3.1.100'
           cache: true
           cache-dependency-path: '**/*.csproj'
+
+      - name: Verify .NET
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "dotnet version:"
+          dotnet --version
+
+          echo
+          echo "Installed SDKs:"
+          dotnet --list-sdks
+
+          echo
+          echo "Installed runtimes:"
+          dotnet --list-runtimes
+
+      # ------------------------------------------------------------
+      # Restore
+      # ------------------------------------------------------------
       - name: Restore
-        run: dotnet restore "${{ inputs.solution }}"
-      - name: Begin SonarQube analysis
-        if: ${{ inputs.sonarqube-enabled }}
         shell: bash
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_PROJECT_KEY: ${{ inputs.sonar-project-key }}
         run: |
           set -euo pipefail
-          if [[ -z "$SONAR_TOKEN" || -z "$SONAR_PROJECT_KEY" ]]; then
-            echo "sonarqube-enabled requires SONAR_TOKEN and sonar-project-key." >&2
-            exit 1
-          fi
-          dotnet tool install --global dotnet-sonarscanner
-          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
-          dotnet sonarscanner begin /k:"$SONAR_PROJECT_KEY" /d:sonar.host.url="https://sonarcloud.io" /d:sonar.cs.vscoveragexml.reportsPaths="coverage.xml"
+
+          dotnet restore "$SOLUTION"
+
+      # ------------------------------------------------------------
+      # Build
+      # ------------------------------------------------------------
       - name: Build
-        run: dotnet build "${{ inputs.solution }}" --configuration "${{ inputs.configuration }}" --no-restore
-      - name: Unit tests
         shell: bash
-        env:
-          TEST_PROJECT: ${{ inputs.test-project }}
-          SOLUTION: ${{ inputs.solution }}
-          CONFIGURATION: ${{ inputs.configuration }}
-          COVERAGE_ENABLED: ${{ inputs.coverage-enabled }}
         run: |
           set -euo pipefail
+
+          dotnet build "$SOLUTION" \
+            --configuration "$CONFIGURATION" \
+            --no-restore
+
+      # ------------------------------------------------------------
+      # Test
+      # ------------------------------------------------------------
+      - name: Test
+        shell: bash
+        run: |
+          set -euo pipefail
+
           target="$SOLUTION"
-          if [[ -n "$TEST_PROJECT" ]]; then target="$TEST_PROJECT"; fi
-          args=(test "$target" --configuration "$CONFIGURATION" --no-build --logger "trx;LogFileName=tests.trx")
-          if [[ "$COVERAGE_ENABLED" == "true" ]]; then args+=(--collect:"XPlat Code Coverage"); fi
+
+          if [[ -n "$TEST_PROJECT" ]]; then
+            target="$TEST_PROJECT"
+          fi
+
+          args=(
+            test "$target"
+            --configuration "$CONFIGURATION"
+            --no-build
+            --logger "trx;LogFileName=tests.trx"
+          )
+
+          if [[ "$COVERAGE_ENABLED" == "true" ]]; then
+            args+=(--collect:"XPlat Code Coverage")
+          fi
+
           dotnet "${args[@]}"
-      - name: End SonarQube analysis
-        if: ${{ always() && inputs.sonarqube-enabled }}
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        run: dotnet sonarscanner end
-      - name: Dependency vulnerability report
-        if: ${{ inputs.security-scan-enabled }}
-        run: dotnet list "${{ inputs.solution }}" package --vulnerable --include-transitive
-      - name: Upload test results and coverage
+
+      # ------------------------------------------------------------
+      # Upload test results
+      # ------------------------------------------------------------
+      - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci-results-${{ github.run_id }}
+          name: test-results
           path: |
             **/TestResults/**/*.trx
-            **/TestResults/**/coverage.cobertura.xml
-          if-no-files-found: ignore
-          retention-days: 14
+            **/TestResults/**/*.xml
+          if-no-files-found: warn
