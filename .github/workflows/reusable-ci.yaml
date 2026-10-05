@@ -42,6 +42,26 @@ on:
         required: false
         default: true
 
+      trivy-version:
+        type: string
+        required: false
+        default: "0.67.2"
+
+      trivy-severity:
+        type: string
+        required: false
+        default: "HIGH,CRITICAL"
+
+      trivy-ignore-unfixed:
+        type: boolean
+        required: false
+        default: true
+
+      trivy-fail-on-vulnerability:
+        type: boolean
+        required: false
+        default: true
+
     secrets:
       SONAR_TOKEN:
         required: false
@@ -50,6 +70,9 @@ jobs:
   ci:
     runs-on: ubuntu-latest
 
+    # The GitHub-hosted runner is still ubuntu-latest,
+    # but the job itself runs inside an environment compatible
+    # with .NET Core 3.1.
     container:
       image: ubuntu:20.04
 
@@ -60,6 +83,7 @@ jobs:
       DEBIAN_FRONTEND: noninteractive
 
     steps:
+
       # ------------------------------------------------------------
       # Base tools
       # ------------------------------------------------------------
@@ -89,20 +113,16 @@ jobs:
 
           rm -rf /var/lib/apt/lists/*
 
+
       # ------------------------------------------------------------
       # Checkout
       # ------------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
+
       # ------------------------------------------------------------
       # .NET SDK
-      #
-      # For .NET Core 3.1 application:
-      #   dotnet-version: 3.1.100
-      #
-      # For modern applications:
-      #   dotnet-version: 8.0.x
       # ------------------------------------------------------------
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -111,6 +131,10 @@ jobs:
           cache: true
           cache-dependency-path: '**/*.csproj'
 
+
+      # ------------------------------------------------------------
+      # Verify .NET environment
+      # ------------------------------------------------------------
       - name: Verify .NET
         shell: bash
         run: |
@@ -130,6 +154,7 @@ jobs:
           echo "Installed runtimes:"
           dotnet --list-runtimes
 
+
       # ------------------------------------------------------------
       # Restore
       # ------------------------------------------------------------
@@ -139,6 +164,7 @@ jobs:
           set -euo pipefail
 
           dotnet restore "${{ inputs.solution }}"
+
 
       # ------------------------------------------------------------
       # SonarQube - Begin
@@ -174,6 +200,7 @@ jobs:
             /d:sonar.token="$SONAR_TOKEN" \
             /d:sonar.cs.vscoveragexml.reportsPaths="coverage.xml"
 
+
       # ------------------------------------------------------------
       # Build
       # ------------------------------------------------------------
@@ -185,6 +212,7 @@ jobs:
           dotnet build "${{ inputs.solution }}" \
             --configuration "${{ inputs.configuration }}" \
             --no-restore
+
 
       # ------------------------------------------------------------
       # Unit tests
@@ -218,6 +246,7 @@ jobs:
 
           dotnet "${args[@]}"
 
+
       # ------------------------------------------------------------
       # SonarQube - End
       # ------------------------------------------------------------
@@ -234,18 +263,83 @@ jobs:
           dotnet sonarscanner end \
             /d:sonar.token="$SONAR_TOKEN"
 
+
       # ------------------------------------------------------------
-      # Dependency vulnerability report
+      # Install Trivy
       # ------------------------------------------------------------
-      - name: Dependency vulnerability report
+      - name: Install Trivy
         if: ${{ inputs.security-scan-enabled }}
         shell: bash
+        env:
+          TRIVY_VERSION: ${{ inputs.trivy-version }}
         run: |
           set -euo pipefail
 
-          dotnet list "${{ inputs.solution }}" package \
-            --vulnerable \
-            --include-transitive
+          ARCH="$(dpkg --print-architecture)"
+
+          case "$ARCH" in
+            amd64)
+              TRIVY_ARCH="64bit"
+              ;;
+            arm64)
+              TRIVY_ARCH="ARM64"
+              ;;
+            *)
+              echo "Unsupported architecture: $ARCH" >&2
+              exit 1
+              ;;
+          esac
+
+          curl -fsSL \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-${TRIVY_ARCH}.tar.gz" \
+            -o /tmp/trivy.tar.gz
+
+          tar -xzf /tmp/trivy.tar.gz \
+            -C /tmp
+
+          install -m 0755 \
+            /tmp/trivy \
+            /usr/local/bin/trivy
+
+          rm -f /tmp/trivy.tar.gz /tmp/trivy
+
+          trivy --version
+
+
+      # ------------------------------------------------------------
+      # Trivy filesystem vulnerability scan
+      # ------------------------------------------------------------
+      - name: Trivy filesystem vulnerability scan
+        if: ${{ inputs.security-scan-enabled }}
+        shell: bash
+        env:
+          TRIVY_SEVERITY: ${{ inputs.trivy-severity }}
+          TRIVY_IGNORE_UNFIXED: ${{ inputs.trivy-ignore-unfixed }}
+          TRIVY_FAIL_ON_VULNERABILITY: ${{ inputs.trivy-fail-on-vulnerability }}
+        run: |
+          set -euo pipefail
+
+          args=(
+            fs
+            --scanners vuln
+            --severity "$TRIVY_SEVERITY"
+            --format table
+          )
+
+          if [[ "$TRIVY_IGNORE_UNFIXED" == "true" ]]; then
+            args+=(--ignore-unfixed)
+          fi
+
+          if [[ "$TRIVY_FAIL_ON_VULNERABILITY" == "true" ]]; then
+            args+=(--exit-code 1)
+          else
+            args+=(--exit-code 0)
+          fi
+
+          args+=(.)
+
+          trivy "${args[@]}"
+
 
       # ------------------------------------------------------------
       # Upload test results / coverage
