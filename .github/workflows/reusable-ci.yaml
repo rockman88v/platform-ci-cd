@@ -45,7 +45,7 @@ on:
       trivy-version:
         type: string
         required: false
-        default: "0.67.2"
+        default: "0.74.0"
 
       trivy-severity:
         type: string
@@ -275,33 +275,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          ARCH="$(dpkg --print-architecture)"
-
-          case "$ARCH" in
-            amd64)
-              TRIVY_ARCH="64bit"
-              ;;
-            arm64)
-              TRIVY_ARCH="ARM64"
-              ;;
-            *)
-              echo "Unsupported architecture: $ARCH" >&2
-              exit 1
-              ;;
-          esac
-
-          curl -fsSL \
-            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-${TRIVY_ARCH}.tar.gz" \
-            -o /tmp/trivy.tar.gz
-
-          tar -xzf /tmp/trivy.tar.gz \
-            -C /tmp
-
-          install -m 0755 \
-            /tmp/trivy \
-            /usr/local/bin/trivy
-
-          rm -f /tmp/trivy.tar.gz /tmp/trivy
+          curl -sfL \
+            https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- \
+              -b /usr/local/bin \
+              "v${TRIVY_VERSION}"
 
           trivy --version
 
