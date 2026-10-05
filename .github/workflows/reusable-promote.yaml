@@ -112,21 +112,19 @@ jobs:
         name: Capture current target image before promotion
         shell: bash
         env:
-          VALUES_FILE: gitops-source/${{ steps.target-config.outputs.chart-path }}/${{ steps.target-config.outputs.values-file }}
-          IMAGE_REPOSITORY_PATH: ${{ steps.target-config.outputs.image-repository-path }}
+          VALUES_FILE: gitops-target/${{ steps.target-config.outputs.chart-path }}/${{ steps.target-config.outputs.values-file }}
           IMAGE_TAG_PATH: ${{ steps.target-config.outputs.image-tag-path }}
           IMAGE_DIGEST_PATH: ${{ steps.target-config.outputs.image-digest-path }}
         run: |
           set -euo pipefail
 
-          python - "$VALUES_FILE" "$IMAGE_REPOSITORY_PATH" "$IMAGE_TAG_PATH" "$IMAGE_DIGEST_PATH" <<'PY' >> "$GITHUB_OUTPUT"
+          python - "$VALUES_FILE" "$IMAGE_TAG_PATH" "$IMAGE_DIGEST_PATH" <<'PY' >> "$GITHUB_OUTPUT"
           import sys
           import yaml
 
           values_file = sys.argv[1]
-          repository_path = sys.argv[2].split(".")
-          tag_path = sys.argv[3].split(".")
-          digest_path = sys.argv[4].split(".")
+          tag_path = sys.argv[2].split(".")
+          digest_path = sys.argv[3].split(".")
 
           with open(values_file) as f:
               values = yaml.safe_load(f)
@@ -136,7 +134,12 @@ jobs:
                   data = data[key]
               return data
 
-          repository = get_path(values, repository_path)
+          # Repository path is fixed by the current Helm values structure.
+          repository = get_path(
+              values,
+              ["microservice", "image", "repository"]
+          )
+
           tag = get_path(values, tag_path)
           digest = get_path(values, digest_path)
 
