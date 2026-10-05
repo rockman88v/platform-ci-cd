@@ -1,0 +1,358 @@
+name: Reusable production rollback
+on:
+  workflow_call:
+    inputs:
+      runner:
+        required: false
+        type: string
+        default: ubuntu-latest
+      environment:
+        description: Environment key in deploy.yaml to roll back
+        required: false
+        type: string
+        default: production
+      config-file:
+        type: string
+        required: false
+        default: deploy.yaml
+      promotion-run-id:
+        description: Successful promotion workflow run ID to roll back
+        required: true
+        type: string
+      promotion-workflow-name:
+        description: Expected name of the promotion workflow run
+        required: false
+        type: string
+        default: Promote PRODUCTION
+      verify-workflow:
+        description: Workflow file dispatched to verify the rollback
+        required: false
+        type: string
+        default: verify-production.yaml
+      dispatch-ref:
+        description: Ref used when dispatching the verification workflow
+        required: false
+        type: string
+        default: main
+      abort-on-drift:
+        description: Fail the rollback if the environment no longer runs the promoted image
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      GITOPS_READ_TOKEN:
+        required: false
+      GITOPS_WRITE_TOKEN:
+        required: false
+permissions:
+  contents: read
+  actions: write
+jobs:
+  rollback:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Validate promotion run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTION_RUN_ID: ${{ inputs.promotion-run-id }}
+          EXPECTED_NAME: ${{ inputs.promotion-workflow-name }}
+        run: |
+          set -euo pipefail
+
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PROMOTION_RUN_ID}")"
+
+          run_name="$(jq -r '.name' <<< "$run_json")"
+          run_status="$(jq -r '.status' <<< "$run_json")"
+          run_conclusion="$(jq -r '.conclusion' <<< "$run_json")"
+          head_repository="$(jq -r '.head_repository.full_name' <<< "$run_json")"
+
+          echo "Promotion run:"
+          echo "  Run ID:      $PROMOTION_RUN_ID"
+          echo "  Name:        $run_name"
+          echo "  Status:      $run_status"
+          echo "  Conclusion:  $run_conclusion"
+          echo "  Repository:  $head_repository"
+
+          [[ "$run_name" == "$EXPECTED_NAME" ]] || {
+            echo "Specified run is not a '$EXPECTED_NAME' workflow." >&2
+            exit 1
+          }
+          [[ "$run_status" == "completed" ]] || {
+            echo "Specified promotion run is not completed." >&2
+            exit 1
+          }
+          [[ "$run_conclusion" == "success" ]] || {
+            echo "Specified promotion run did not succeed." >&2
+            exit 1
+          }
+          [[ "$head_repository" == "$GITHUB_REPOSITORY" ]] || {
+            echo "Specified promotion run does not belong to this repository." >&2
+            exit 1
+          }
+
+      # Checkout must run before the artifact download, which it would otherwise clean.
+      - uses: actions/checkout@v4
+
+      - name: Read deployment config
+        id: config
+        uses: rockman88v/platform-ci-cd/.github/actions/read-deploy-config@main
+        with:
+          config-file: ${{ inputs.config-file }}
+          environment: ${{ inputs.environment }}
+
+      - name: Download release context
+        uses: actions/download-artifact@v4
+        with:
+          name: release-context
+          path: release-context
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.promotion-run-id }}
+          github-token: ${{ github.token }}
+
+      - id: context
+        name: Validate release context
+        shell: bash
+        env:
+          EXPECTED_PROMOTION_RUN_ID: ${{ inputs.promotion-run-id }}
+          TARGET_ENV: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+
+          CONTEXT_FILE="release-context/release-context.json"
+
+          [[ -f "$CONTEXT_FILE" ]] || {
+            echo "release-context.json not found." >&2
+            exit 1
+          }
+
+          echo "Release context:"
+          jq . "$CONTEXT_FILE"
+
+          field() {
+            jq -er "$1 | strings | select(length > 0)" "$CONTEXT_FILE" || {
+              echo "release-context field '$1' is missing or empty." >&2
+              return 1
+            }
+          }
+
+          promotion_run_id="$(field .promotionRunId)"
+          environment="$(field .environment)"
+          source_sha="$(field .sourceSha)"
+          build_run_id="$(field .buildRunId)"
+
+          gitops_repository="$(field .gitops.repository)"
+          chart_path="$(field .gitops.chartPath)"
+          values_file="$(field .gitops.valuesFile)"
+
+          previous_repository="$(field .previousImage.repository)"
+          previous_tag="$(field .previousImage.tag)"
+          previous_digest="$(field .previousImage.digest)"
+
+          promoted_repository="$(field .promotedImage.repository)"
+          promoted_tag="$(field .promotedImage.tag)"
+          promoted_digest="$(field .promotedImage.digest)"
+
+          [[ "$promotion_run_id" == "$EXPECTED_PROMOTION_RUN_ID" ]] || {
+            echo "release-context does not belong to the specified promotion run." >&2
+            echo "Expected: $EXPECTED_PROMOTION_RUN_ID" >&2
+            echo "Actual:   $promotion_run_id" >&2
+            exit 1
+          }
+          [[ "$environment" == "$TARGET_ENV" ]] || {
+            echo "release-context environment is '$environment', expected '$TARGET_ENV'." >&2
+            exit 1
+          }
+          [[ "$source_sha" =~ ^[a-fA-F0-9]{40}$ ]] || {
+            echo "sourceSha is invalid." >&2
+            exit 1
+          }
+          [[ "$build_run_id" =~ ^[0-9]+$ ]] || {
+            echo "buildRunId is invalid." >&2
+            exit 1
+          }
+          [[ "$previous_digest" =~ ^sha256:[a-fA-F0-9]{64}$ ]] || {
+            echo "Previous image digest is invalid." >&2
+            exit 1
+          }
+          [[ "$promoted_digest" =~ ^sha256:[a-fA-F0-9]{64}$ ]] || {
+            echo "Promoted image digest is invalid." >&2
+            exit 1
+          }
+
+          {
+            echo "source-sha=$source_sha"
+            echo "build-run-id=$build_run_id"
+
+            echo "gitops-repository=$gitops_repository"
+            echo "chart-path=$chart_path"
+            echo "values-file=$values_file"
+
+            echo "previous-repository=$previous_repository"
+            echo "previous-tag=$previous_tag"
+            echo "previous-digest=$previous_digest"
+
+            echo "promoted-repository=$promoted_repository"
+            echo "promoted-tag=$promoted_tag"
+            echo "promoted-digest=$promoted_digest"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout GitOps repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.context.outputs.gitops-repository }}
+          token: ${{ secrets.GITOPS_READ_TOKEN }}
+          path: gitops
+          persist-credentials: false
+
+      # Optimistic concurrency check: the environment should still run the promoted image.
+      - name: Verify environment still runs promoted image
+        continue-on-error: ${{ !inputs.abort-on-drift }}
+        shell: bash
+        env:
+          VALUES_FILE: gitops/${{ steps.context.outputs.chart-path }}/${{ steps.context.outputs.values-file }}
+          IMAGE_TAG_PATH: ${{ steps.config.outputs.image-tag-path }}
+          IMAGE_DIGEST_PATH: ${{ steps.config.outputs.image-digest-path }}
+          EXPECTED_REPOSITORY: ${{ steps.context.outputs.promoted-repository }}
+          EXPECTED_TAG: ${{ steps.context.outputs.promoted-tag }}
+          EXPECTED_DIGEST: ${{ steps.context.outputs.promoted-digest }}
+        run: |
+          set -euo pipefail
+
+          [[ -f "$VALUES_FILE" ]] || {
+            echo "Values file not found: $VALUES_FILE" >&2
+            exit 1
+          }
+
+          # The repository key sits next to the tag key in the image block.
+          image_repository_path="${IMAGE_TAG_PATH%.*}.repository"
+
+          current="$(
+            python3 - "$VALUES_FILE" "$image_repository_path" "$IMAGE_TAG_PATH" "$IMAGE_DIGEST_PATH" <<'PY'
+          import sys
+          import yaml
+
+          with open(sys.argv[1]) as f:
+              values = yaml.safe_load(f)
+
+          for dotted in sys.argv[2:]:
+              node = values
+              for key in dotted.split("."):
+                  node = node[key]
+              print(node)
+          PY
+          )"
+
+          mapfile -t current_image <<< "$current"
+          current_repository="${current_image[0]}"
+          current_tag="${current_image[1]}"
+          current_digest="${current_image[2]}"
+
+          echo "Current image:  $current_repository:$current_tag@$current_digest"
+          echo "Expected image: $EXPECTED_REPOSITORY:$EXPECTED_TAG@$EXPECTED_DIGEST"
+
+          if [[ "$current_repository" != "$EXPECTED_REPOSITORY" \
+             || "$current_tag" != "$EXPECTED_TAG" \
+             || "$current_digest" != "$EXPECTED_DIGEST" ]]; then
+            echo "The environment image has changed since promotion; rolling back may overwrite a newer deployment." >&2
+            exit 1
+          fi
+
+          echo "Environment still points to the promoted artifact."
+
+      # Creates a new GitOps commit; the promotion commit is intentionally not reverted.
+      - name: Rollback image in GitOps
+        uses: rockman88v/platform-ci-cd/.github/actions/update-gitops@main
+        with:
+          gitops-repository: ${{ steps.context.outputs.gitops-repository }}
+          gitops-token: ${{ secrets.GITOPS_WRITE_TOKEN }}
+          chart-path: ${{ steps.context.outputs.chart-path }}
+          values-file: ${{ steps.context.outputs.values-file }}
+          image-tag-path: ${{ steps.config.outputs.image-tag-path }}
+          image-tag: ${{ steps.context.outputs.previous-tag }}
+          image-digest-path: ${{ steps.config.outputs.image-digest-path }}
+          image-digest: ${{ steps.context.outputs.previous-digest }}
+          commit-message: "rollback(${{ steps.config.outputs.application }}): restore ${{ steps.context.outputs.previous-tag }} (${{ steps.context.outputs.previous-digest }}) in ${{ inputs.environment }}"
+
+      - name: Create rollback context
+        shell: bash
+        env:
+          PROMOTION_RUN_ID: ${{ inputs.promotion-run-id }}
+          ROLLBACK_RUN_ID: ${{ github.run_id }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          SOURCE_SHA: ${{ steps.context.outputs.source-sha }}
+          BUILD_RUN_ID: ${{ steps.context.outputs.build-run-id }}
+          GITOPS_REPOSITORY: ${{ steps.context.outputs.gitops-repository }}
+          CHART_PATH: ${{ steps.context.outputs.chart-path }}
+          VALUES_FILE: ${{ steps.context.outputs.values-file }}
+          PREVIOUS_REPOSITORY: ${{ steps.context.outputs.previous-repository }}
+          PREVIOUS_TAG: ${{ steps.context.outputs.previous-tag }}
+          PREVIOUS_DIGEST: ${{ steps.context.outputs.previous-digest }}
+          PROMOTED_REPOSITORY: ${{ steps.context.outputs.promoted-repository }}
+          PROMOTED_TAG: ${{ steps.context.outputs.promoted-tag }}
+          PROMOTED_DIGEST: ${{ steps.context.outputs.promoted-digest }}
+        run: |
+          set -euo pipefail
+
+          jq -n \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg buildRunId "$BUILD_RUN_ID" \
+            --arg promotionRunId "$PROMOTION_RUN_ID" \
+            --arg rollbackRunId "$ROLLBACK_RUN_ID" \
+            --arg environment "$ENVIRONMENT" \
+            --arg gitopsRepository "$GITOPS_REPOSITORY" \
+            --arg chartPath "$CHART_PATH" \
+            --arg valuesFile "$VALUES_FILE" \
+            --arg previousRepository "$PREVIOUS_REPOSITORY" \
+            --arg previousTag "$PREVIOUS_TAG" \
+            --arg previousDigest "$PREVIOUS_DIGEST" \
+            --arg promotedRepository "$PROMOTED_REPOSITORY" \
+            --arg promotedTag "$PROMOTED_TAG" \
+            --arg promotedDigest "$PROMOTED_DIGEST" \
+            '{
+              sourceSha: $sourceSha,
+              buildRunId: $buildRunId,
+              promotionRunId: $promotionRunId,
+              rollbackRunId: $rollbackRunId,
+              environment: $environment,
+              gitops: {
+                repository: $gitopsRepository,
+                chartPath: $chartPath,
+                valuesFile: $valuesFile
+              },
+              previousImage: {
+                repository: $previousRepository,
+                tag: $previousTag,
+                digest: $previousDigest
+              },
+              rolledBackFromImage: {
+                repository: $promotedRepository,
+                tag: $promotedTag,
+                digest: $promotedDigest
+              }
+            }' > release-context.json
+
+          cat release-context.json
+
+      - name: Upload rollback context
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-context
+          path: release-context.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Dispatch verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFY_WORKFLOW: ${{ inputs.verify-workflow }}
+          DISPATCH_REF: ${{ inputs.dispatch-ref }}
+          UPSTREAM_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          gh workflow run "$VERIFY_WORKFLOW" \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$DISPATCH_REF" \
+            -f upstream-run-id="$UPSTREAM_RUN_ID" \
+            -f lifecycle-type="rollback"
