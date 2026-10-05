@@ -16,6 +16,11 @@ on:
       upstream-run-id:
         type: string
         required: true
+      lifecycle-type:
+        description: "Lifecycle operation that triggered verification"
+        required: false
+        type: string
+        default: promotion
     secrets:
       GITOPS_READ_TOKEN:
         required: false
@@ -150,25 +155,116 @@ jobs:
 
           echo
           echo "Runner preparation completed."      
+      # - name: Validate upstream lifecycle run
+      #   shell: bash
+      #   env:
+      #     GH_TOKEN: ${{ github.token }}
+      #     UPSTREAM_RUN_ID: ${{ inputs.upstream-run-id }}
+      #     TARGET_ENV: ${{ inputs.environment }}
+      #   run: |
+      #     set -euo pipefail
+      #     run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${UPSTREAM_RUN_ID}")"
+      #     expected_name="Deploy DEV"
+      #     if [[ "$TARGET_ENV" == "staging" ]]; then
+      #       expected_name="Promote STAGING"
+      #     elif [[ "$TARGET_ENV" == "production" ]]; then
+      #       expected_name="Promote PRODUCTION"
+      #     fi
+      #     [[ "$(jq -r .name <<< "$run_json")" == "$expected_name" ]]
+      #     [[ "$(jq -r .status <<< "$run_json")" == "completed" ]]
+      #     [[ "$(jq -r .conclusion <<< "$run_json")" == "success" ]]
+      #     [[ "$(jq -r .head_repository.full_name <<< "$run_json")" == "$GITHUB_REPOSITORY" ]]
+
       - name: Validate upstream lifecycle run
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           UPSTREAM_RUN_ID: ${{ inputs.upstream-run-id }}
           TARGET_ENV: ${{ inputs.environment }}
+          LIFECYCLE_TYPE: ${{ inputs.lifecycle-type }}
         run: |
           set -euo pipefail
-          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${UPSTREAM_RUN_ID}")"
-          expected_name="Deploy DEV"
-          if [[ "$TARGET_ENV" == "staging" ]]; then
-            expected_name="Promote STAGING"
-          elif [[ "$TARGET_ENV" == "production" ]]; then
-            expected_name="Promote PRODUCTION"
-          fi
-          [[ "$(jq -r .name <<< "$run_json")" == "$expected_name" ]]
-          [[ "$(jq -r .status <<< "$run_json")" == "completed" ]]
-          [[ "$(jq -r .conclusion <<< "$run_json")" == "success" ]]
-          [[ "$(jq -r .head_repository.full_name <<< "$run_json")" == "$GITHUB_REPOSITORY" ]]
+
+          run_json="$(
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${UPSTREAM_RUN_ID}"
+          )"
+
+          actual_name="$(jq -r '.name' <<< "$run_json")"
+          status="$(jq -r '.status' <<< "$run_json")"
+          conclusion="$(jq -r '.conclusion' <<< "$run_json")"
+          head_repository="$(jq -r '.head_repository.full_name' <<< "$run_json")"
+
+          echo "Upstream lifecycle run:"
+          echo "  Run ID:          $UPSTREAM_RUN_ID"
+          echo "  Name:            $actual_name"
+          echo "  Status:          $status"
+          echo "  Conclusion:      $conclusion"
+          echo "  Repository:      $head_repository"
+          echo "  Target env:      $TARGET_ENV"
+          echo "  Lifecycle type:  $LIFECYCLE_TYPE"
+
+          case "$LIFECYCLE_TYPE" in
+            promotion)
+              expected_name=""
+
+              case "$TARGET_ENV" in
+                test)
+                  expected_name="Deploy DEV"
+                  ;;
+                staging)
+                  expected_name="Promote STAGING"
+                  ;;
+                production)
+                  expected_name="Promote PRODUCTION"
+                  ;;
+                *)
+                  echo "Unsupported promotion target environment: $TARGET_ENV" >&2
+                  exit 1
+                  ;;
+              esac
+              ;;
+
+            rollback)
+              if [[ "$TARGET_ENV" != "production" ]]; then
+                echo "Rollback is currently supported only for production." >&2
+                exit 1
+              fi
+
+              expected_name="Rollback PRODUCTION"
+              ;;
+
+            *)
+              echo "Unsupported lifecycle type: $LIFECYCLE_TYPE" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "Expected upstream workflow: $expected_name"
+
+          [[ "$actual_name" == "$expected_name" ]] || {
+            echo "Invalid upstream workflow name." >&2
+            echo "Expected: $expected_name" >&2
+            echo "Actual:   $actual_name" >&2
+            exit 1
+          }
+
+          [[ "$status" == "completed" ]] || {
+            echo "Upstream workflow is not completed." >&2
+            exit 1
+          }
+
+          [[ "$conclusion" == "success" ]] || {
+            echo "Upstream workflow did not succeed." >&2
+            exit 1
+          }
+
+          [[ "$head_repository" == "$GITHUB_REPOSITORY" ]] || {
+            echo "Upstream workflow belongs to another repository." >&2
+            exit 1
+          }
+
+          echo "Upstream lifecycle run validation passed."
+
       - uses: actions/download-artifact@v4
         with:
           name: release-context

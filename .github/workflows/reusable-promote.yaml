@@ -107,6 +107,53 @@ jobs:
           token: ${{ secrets.GITOPS_READ_TOKEN }}
           path: gitops-source
           persist-credentials: false
+
+      - id: previous-image
+        name: Capture current target image before promotion
+        shell: bash
+        env:
+          VALUES_FILE: gitops-target/${{ steps.target-config.outputs.chart-path }}/${{ steps.target-config.outputs.values-file }}
+          IMAGE_REPOSITORY_PATH: ${{ steps.target-config.outputs.image-repository-path }}
+          IMAGE_TAG_PATH: ${{ steps.target-config.outputs.image-tag-path }}
+          IMAGE_DIGEST_PATH: ${{ steps.target-config.outputs.image-digest-path }}
+        run: |
+          set -euo pipefail
+
+          python - "$VALUES_FILE" "$IMAGE_REPOSITORY_PATH" "$IMAGE_TAG_PATH" "$IMAGE_DIGEST_PATH" <<'PY' >> "$GITHUB_OUTPUT"
+          import sys
+          import yaml
+
+          values_file = sys.argv[1]
+          repository_path = sys.argv[2].split(".")
+          tag_path = sys.argv[3].split(".")
+          digest_path = sys.argv[4].split(".")
+
+          with open(values_file) as f:
+              values = yaml.safe_load(f)
+
+          def get_path(data, path):
+              for key in path:
+                  data = data[key]
+              return data
+
+          repository = get_path(values, repository_path)
+          tag = get_path(values, tag_path)
+          digest = get_path(values, digest_path)
+
+          if not repository:
+              raise SystemExit("Current target image repository is empty")
+
+          if not tag:
+              raise SystemExit("Current target image tag is empty")
+
+          if not digest:
+              raise SystemExit("Current target image digest is empty")
+
+          print(f"repository={repository}")
+          print(f"tag={tag}")
+          print(f"digest={digest}")
+          PY
+      
       - name: Compare source environment digest
         shell: bash
         env:
@@ -134,11 +181,77 @@ jobs:
           image-digest-path: ${{ steps.target-config.outputs.image-digest-path }}
           image-digest: ${{ steps.metadata.outputs.image-digest }}
           commit-message: "chore(${{ steps.target-config.outputs.application }}): promote ${{ steps.metadata.outputs.git-sha }} to ${{ inputs.environment }}"
+      # - name: Preserve release context for the next workflow
+      #   env:
+      #     SOURCE_SHA: ${{ steps.context.outputs.source-sha }}
+      #     BUILD_RUN_ID: ${{ steps.context.outputs.build-run-id }}
+      #     PREVIOUS_REPOSITORY: ${{ steps.previous-image.outputs.repository }}
+      #     PREVIOUS_TAG: ${{ steps.previous-image.outputs.tag }}
+      #     PREVIOUS_DIGEST: ${{ steps.previous-image.outputs.digest }}
+      #   run: jq -n --arg sourceSha "$SOURCE_SHA" --arg buildRunId "$BUILD_RUN_ID" --arg previousRepository "$PREVIOUS_REPOSITORY" --arg previousTag "$PREVIOUS_TAG" --arg previousDigest "$PREVIOUS_DIGEST" '{sourceSha:$sourceSha,buildRunId:$buildRunId,previousRepository:$previousRepository,previousTag:$previousTag,previousDigest:$previousDigest}' > release-context.json
+      
       - name: Preserve release context for the next workflow
         env:
           SOURCE_SHA: ${{ steps.context.outputs.source-sha }}
           BUILD_RUN_ID: ${{ steps.context.outputs.build-run-id }}
-        run: jq -n --arg sourceSha "$SOURCE_SHA" --arg buildRunId "$BUILD_RUN_ID" '{sourceSha:$sourceSha,buildRunId:$buildRunId}' > release-context.json
+
+          ENVIRONMENT: ${{ inputs.environment }}
+
+          GITOPS_REPOSITORY: ${{ steps.target-config.outputs.gitops-repository }}
+          CHART_PATH: ${{ steps.target-config.outputs.chart-path }}
+          VALUES_FILE: ${{ steps.target-config.outputs.values-file }}
+
+          PREVIOUS_REPOSITORY: ${{ steps.previous-image.outputs.repository }}
+          PREVIOUS_TAG: ${{ steps.previous-image.outputs.tag }}
+          PREVIOUS_DIGEST: ${{ steps.previous-image.outputs.digest }}
+
+          PROMOTED_REPOSITORY: ${{ steps.metadata.outputs.image-repository }}
+          PROMOTED_TAG: ${{ steps.metadata.outputs.image-tag }}
+          PROMOTED_DIGEST: ${{ steps.metadata.outputs.image-digest }}
+
+          PROMOTION_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          jq -n \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg buildRunId "$BUILD_RUN_ID" \
+            --arg environment "$ENVIRONMENT" \
+            --arg gitopsRepository "$GITOPS_REPOSITORY" \
+            --arg chartPath "$CHART_PATH" \
+            --arg valuesFile "$VALUES_FILE" \
+            --arg previousRepository "$PREVIOUS_REPOSITORY" \
+            --arg previousTag "$PREVIOUS_TAG" \
+            --arg previousDigest "$PREVIOUS_DIGEST" \
+            --arg promotedRepository "$PROMOTED_REPOSITORY" \
+            --arg promotedTag "$PROMOTED_TAG" \
+            --arg promotedDigest "$PROMOTED_DIGEST" \
+            --arg promotionRunId "$PROMOTION_RUN_ID" \
+            '{
+              sourceSha: $sourceSha,
+              buildRunId: $buildRunId,
+              promotionRunId: $promotionRunId,
+              environment: $environment,
+
+              gitops: {
+                repository: $gitopsRepository,
+                chartPath: $chartPath,
+                valuesFile: $valuesFile
+              },
+
+              previousImage: {
+                repository: $previousRepository,
+                tag: $previousTag,
+                digest: $previousDigest
+              },
+
+              promotedImage: {
+                repository: $promotedRepository,
+                tag: $promotedTag,
+                digest: $promotedDigest
+              }
+            }' > release-context.json
+      
       - uses: actions/upload-artifact@v4
         with:
           name: release-context
